@@ -58,12 +58,12 @@ static cl::opt<bool> Force("f", cl::desc("Enable binary output on terminals"),
                            cl::cat(ExtractCat));
 
 static cl::opt<bool> DeleteFn("delete",
-                              cl::desc("Delete specified Globals from Module"),
-                              cl::cat(ExtractCat));
+                           cl::desc("Delete specified Globals from Module"),
+                           cl::cat(ExtractCat));
 
 static cl::opt<bool> KeepConstInit("keep-const-init",
-                              cl::desc("Keep initializers of constants"),
-                              cl::cat(ExtractCat));
+                           cl::desc("Keep initializers of constants"),
+                           cl::cat(ExtractCat));
 
 static cl::opt<bool>
     Recursive("recursive", cl::desc("Recursively extract all called functions"),
@@ -96,7 +96,9 @@ static cl::list<std::string> ExtractBlocks(
         "  --bb=f:bb1;bb2 will extract one function with both bb1 and bb2;\n"
         "  --bb=f:bb1 --bb=f:bb2 will extract two functions, one with bb1, one "
         "with bb2.\n"
-        "  --bb=f:%1 will extract one function with basic block 1;"),
+        "  --bb=f:%1 will extract one function with basic block 1;\n"
+        "  --bb=f:* will extract every basic block of f into its own "
+        "function."),
     cl::value_desc("function:bb1[;bb2...]"), cl::cat(ExtractCat));
 
 // ExtractAlias - The alias to extract from the module.
@@ -264,7 +266,23 @@ int main(int argc, char **argv) {
     // Add the function to the materialize list, and store the basic block names
     // to check after materialization.
     GVs.insert(F);
-    BBInfo.second.split(BBNames, ';', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
+    if (BBInfo.second.compare("*") == 0) {
+      BBNames.push_back("*");
+    } else {
+      BBInfo.second.split(BBNames, ';', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
+      bool UsesAllKeyword = false;
+      for (StringRef BBName : BBNames) {
+        if (BBName.compare("*") == 0) {
+          UsesAllKeyword = true;
+          break;
+        }
+      }
+      if (UsesAllKeyword) {
+        errs() << argv[0] << ": '--bb=" << BBInfo.first
+               << ":*' cannot be combined with other basic block names!\n";
+        return 1;
+      }
+    }
     BBMap.push_back({F, std::move(BBNames)});
   }
 
@@ -344,6 +362,23 @@ int main(int argc, char **argv) {
     // Figure out which BasicBlocks we should extract.
     std::vector<std::vector<BasicBlock *>> GroupOfBBs;
     for (auto &P : BBMap) {
+      bool ExtractAll =
+          P.second.size() == 1 && (P.second.front().compare("*") == 0);
+      if (ExtractAll) {
+        if (P.first->isDeclaration()) {
+          errs() << argv[0] << ": function " << P.first->getName()
+                 << " does not have a body for '--bb=" << P.first->getName()
+                 << ":*'!\n";
+          return 1;
+        }
+        for (BasicBlock &BB : *P.first) {
+          std::vector<BasicBlock *> SingleBB;
+          SingleBB.push_back(&BB);
+          GroupOfBBs.push_back(std::move(SingleBB));
+        }
+        continue;
+      }
+
       std::vector<BasicBlock *> BBs;
       for (StringRef BBName : P.second) {
         // The function has been materialized, so add its matching basic blocks
@@ -359,7 +394,7 @@ int main(int argc, char **argv) {
         }
         BBs.push_back(&*Res);
       }
-      GroupOfBBs.push_back(BBs);
+      GroupOfBBs.push_back(std::move(BBs));
     }
 
     LoopAnalysisManager LAM;
